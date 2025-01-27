@@ -4,84 +4,68 @@
 #include <math.h>
 #include <sys/time.h>
 
-#define totaldegrees 180
-#define binsperdegree 4
-#define threadsperblock 512
-
-// data for the real galaxies will be read into these arrays
+// Real galaxy arrays
 float *ra_real, *decl_real;
-// number of real galaxies
+//Number of real galaxies
 int    NoofReal;
-
-// data for the simulated random galaxies will be read into these arrays
+// Simulated galaxy arrays
 float *ra_sim, *decl_sim;
-// number of simulated random galaxies
+// Number of simulated galaxies
 int    NoofSim;
-
-///////////
-
+// Number of threads per block
 int threadsPerBlock = 512;
-
-
 // Unit Conversion
 const float ARCMIN_TO_RAD = (M_PI / 180.0f) / 60.0f;
 const float RAD_TO_DEG = 180.0f / M_PI;
-
+// Bin cofiguration
 const float BIN_SIZE = 0.25f;
 const int NUM_BINS = (int)(90.0f / BIN_SIZE);
-
-//Real - Real
-int histogramDD[NUM_BINS] = {0};
-//Real - Simulated
-int histogramDR[NUM_BINS] = {0};
-// Simulated  - Simulated
-int histogramRR[NUM_BINS] = {0};
-
+//Real - Real Histogram
+long long histogramDD[NUM_BINS] = {0};
+//Real - Simulated Histogram
+long long histogramDR[NUM_BINS] = {0};
+// Simulated  - Simulated Histogram
+long long histogramRR[NUM_BINS] = {0};
+// Omega values
 float omega[NUM_BINS] = {0.0f};
 
-float calculateAngularSeparation(float raOneRad, float declOneRad, float raTwoRad, float declTwoRad) {
-    return acosf(sinf(declOneRad) * sinf(declTwoRad) +
-                 cosf(declOneRad) * cosf(declTwoRad) *
-                 cosf(raOneRad - raTwoRad)) * RAD_TO_DEG;
-}
-
+// Calculate the angular separation between two galaxies on the GPU
 __device__ float calculateAngularSeparationKernel(float raOneRad, float declOneRad, float raTwoRad, float declTwoRad) {
-    return acosf(sinf(declOneRad) * sinf(declTwoRad) +
-                 cosf(declOneRad) * cosf(declTwoRad) *
-                 cosf(raOneRad - raTwoRad)) * RAD_TO_DEG;
-}
+  float temp = sinf(declOneRad) * sinf(declTwoRad) +
+               cosf(declOneRad) * cosf(declTwoRad) *
+               cosf(raOneRad - raTwoRad);
 
-__global__ void fillBinsOptimizedKernel(float *ra_real, float *decl_real, int NoofReal, float *ra_sim, float *decl_sim, int NoofSim, int *histogramDD, int *histogramDR, int *histogramRR) {
+  if (temp > 1.0f) temp = 1.0f;
+  if (temp < -1.0f) temp = -1.0f;
+
+  return acosf(temp) * RAD_TO_DEG;
+}
+// Calculate histograms on the GPU
+__global__ void fillBinsOptimizedKernel(float *ra_real, float *decl_real, int NoofReal, float *ra_sim, float *decl_sim, int NoofSim, long long *histogramDD, long long *histogramDR, long long *histogramRR) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < NoofReal) {
         float raRealRad = ra_real[i] * ARCMIN_TO_RAD;
         float declRealRad = decl_real[i] * ARCMIN_TO_RAD;
 
-        // Real - Real (histogramDD)
         for (int j = 0; j < NoofReal; j++) {
             float raOtherRad = ra_real[j] * ARCMIN_TO_RAD;
             float declOtherRad = decl_real[j] * ARCMIN_TO_RAD;
 
             float resDeg = calculateAngularSeparationKernel(raRealRad, declRealRad, raOtherRad, declOtherRad);
-            if (resDeg >= 0.0f && resDeg < 90.0f) {
-                int binIndex = (int)(resDeg / BIN_SIZE);
-                atomicAdd(&histogramDD[binIndex], 1);
-            }
+            int binIndex = (int)(resDeg / BIN_SIZE);
+            atomicAdd(&histogramDD[binIndex], 1LL);
         }
 
-        // Real - Sim (histogramDR)
         for (int j = 0; j < NoofSim; j++) {
             float raSimRad = ra_sim[j] * ARCMIN_TO_RAD;
             float declSimRad = decl_sim[j] * ARCMIN_TO_RAD;
 
             float resDeg = calculateAngularSeparationKernel(raRealRad, declRealRad, raSimRad, declSimRad);
-            if (resDeg >= 0.0f && resDeg < 90.0f) {
-                int binIndex = (int)(resDeg / BIN_SIZE);
-                atomicAdd(&histogramDR[binIndex], 1);
-            }
+            int binIndex = (int)(resDeg / BIN_SIZE);
+            atomicAdd(&histogramDR[binIndex], 1LL);
         }
     }
-    // Avoid that the index gets out of bounds
+
     if (i < NoofSim) {
         float raSimRad = ra_sim[i] * ARCMIN_TO_RAD;
         float declSimRad = decl_sim[i] * ARCMIN_TO_RAD;
@@ -91,69 +75,13 @@ __global__ void fillBinsOptimizedKernel(float *ra_real, float *decl_real, int No
             float declOtherRad = decl_sim[j] * ARCMIN_TO_RAD;
 
             float resDeg = calculateAngularSeparationKernel(raSimRad, declSimRad, raOtherRad, declOtherRad);
-            if (resDeg >= 0.0f && resDeg < 90.0f) {
-                int binIndex = (int)(resDeg / BIN_SIZE);
-                atomicAdd(&histogramRR[binIndex], 1);
-            }
+            int binIndex = (int)(resDeg / BIN_SIZE);
+            atomicAdd(&histogramRR[binIndex], 1LL);
         }
     }
 }
 
-
-int fillBinsOptimized() {
-    if (ra_real == NULL || decl_real == NULL || ra_sim == NULL || decl_sim == NULL) {
-        printf("Error: Null pointer detected in fillBinsOptimized.\n");
-        return -1;
-    }
-
-    for (int i = 0; i < NoofReal; i++) {
-        float raRealRad = ra_real[i] * ARCMIN_TO_RAD;
-        float declRealRad = decl_real[i] * ARCMIN_TO_RAD;
-
-        // Real - Real (histogramDD)
-        for (int j = 0; j < NoofReal; j++) {
-            float raOtherRad = ra_real[j] * ARCMIN_TO_RAD;
-            float declOtherRad = decl_real[j] * ARCMIN_TO_RAD;
-
-            float resDeg = calculateAngularSeparation(raRealRad, declRealRad, raOtherRad, declOtherRad);
-            if (resDeg >= 0.0f && resDeg < 90.0f) {
-                int binIndex = (int)(resDeg / BIN_SIZE);
-                histogramDD[binIndex]++;
-            }
-        }
-
-        // Real - Sim (histogramDR)
-        for (int j = 0; j < NoofSim; j++) {
-            float raSimRad = ra_sim[j] * ARCMIN_TO_RAD;
-            float declSimRad = decl_sim[j] * ARCMIN_TO_RAD;
-
-            float resDeg = calculateAngularSeparation(raRealRad, declRealRad, raSimRad, declSimRad);
-            if (resDeg >= 0.0f && resDeg < 90.0f) {
-                int binIndex = (int)(resDeg / BIN_SIZE);
-                histogramDR[binIndex]++;
-            }
-        }
-    }
-
-    // Simulated - Simulated (histogramRR)
-    for (int i = 0; i < NoofSim; i++) {
-        float raSimRad = ra_sim[i] * ARCMIN_TO_RAD;
-        float declSimRad = decl_sim[i] * ARCMIN_TO_RAD;
-
-        for (int j = 0; j < NoofSim; j++) {
-            float raOtherRad = ra_sim[j] * ARCMIN_TO_RAD;
-            float declOtherRad = decl_sim[j] * ARCMIN_TO_RAD;
-
-            float resDeg = calculateAngularSeparation(raSimRad, declSimRad, raOtherRad, declOtherRad);
-            if (resDeg >= 0.0f && resDeg < 90.0f) {
-                int binIndex = (int)(resDeg / BIN_SIZE);
-                histogramRR[binIndex]++;
-            }
-        }
-    }
-    return 0;
-}
-
+// Calculate Omega in CPU
 int calculateOmega() {
     for (int i = 0; i < NUM_BINS; i++) {
         if (histogramRR[i] != 0) {
@@ -166,28 +94,51 @@ int calculateOmega() {
 }
 
 int printResults(){
-    printf("Bin counts (First 10 bins):\n");
+    int count = 15;
+    long long histogramDDsum = 0;
+    long long histogramDRsum = 0;
+    long long histogramRRsum = 0;
 
+
+    printf("First %d bins:\n", count);
     printf("HistogramDD:\n");
-    for (int i = 0; i < 10; i++) printf("Bin %d: %d\n", i, histogramDD[i]);
+    for (int i = 0; i < NUM_BINS; i++){
+        if (i < count){
+            printf("Bin %d: %d\n", i, histogramDD[i]);
+        }
+        histogramDDsum += histogramDD[i];
+    }
+    printf("Histogram DD Sum: %lld\n", histogramDDsum);
+
     printf("HistogramDR:\n");
-    for (int i = 0; i < 10; i++) printf("Bin %d: %d\n", i, histogramDR[i]);
+    for (int i = 0; i < NUM_BINS; i++){
+        if (i < count){
+            printf("Bin %d: %d\n", i, histogramDR[i]);
+        }
+        histogramDRsum += histogramDR[i];
+    }
+    printf("Histogram DR Sum: %lld\n", histogramDRsum);
+
     printf("HistogramRR:\n");
-    for (int i = 0; i < 10; i++) printf("Bin %d: %d\n", i, histogramRR[i]);
+    for (int i = 0; i < NUM_BINS; i++){
+        if (i < count){
+            printf("Bin %d: %d\n", i, histogramRR[i]);
+        }
+        histogramRRsum += histogramRR[i];
+    }
+    printf("Histogram RR Sum: %lld\n", histogramRRsum);
+
     printf("Omega:\n");
     for (int i = 0; i < 10; i++) printf("Bin %d: %f\n", i, omega[i]);
-
     return 0;
 }
 
 
-int main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]){
    int    i;
-   int    noofblocks;
    int    readdata(char *argv1, char *argv2);
    int    getDevice(int deviceno);
-   long int histogramDRsum, histogramDDsum, histogramRRsum;
+   long long histogramDRsum, histogramDDsum, histogramRRsum;
    double w;
    double start, end, kerneltime;
    struct timeval _ttime;
@@ -196,20 +147,18 @@ int main(int argc, char *argv[])
 
    FILE *outfil;
 
-   if ( argc != 4 ) {printf("Usage: a.out real_data random_data output_data\n");return(-1);}
+    if ( argc != 4 ) {printf("Usage: a.out real_data random_data output_data\n");return(-1);}
 
-   if ( getDevice(0) != 0 ) return(-1);
+    if ( getDevice(0) != 0 ) return(-1);
 
-   if ( readdata(argv[1], argv[2]) != 0 ) return(-1);
+    if ( readdata(argv[1], argv[2]) != 0 ) return(-1);
 
-   // allocate memory on the GPU
-
-    // Memory allocation varibles
-    int *histogramDDGPU, *histogramDRGPU, *histogramRRGPU;
+    // GPU memory allocation variables
+    long long *histogramDDGPU, *histogramDRGPU, *histogramRRGPU;
     float *raRealGPU, *declRealGPU, *raSimGPU, *declSimGPU;
 
-    // Sizes for memory allocation
-    size_t arraybytes = NUM_BINS * sizeof(int);
+    // GPU sizes for memory allocation
+    size_t arraybytes = NUM_BINS * sizeof(long long);
     size_t realbytes = NoofReal * sizeof(float);
     size_t simbytes = NoofSim * sizeof(float);
 
@@ -217,10 +166,8 @@ int main(int argc, char *argv[])
     cudaMalloc(&histogramDDGPU, arraybytes);
     cudaMalloc(&histogramDRGPU, arraybytes);
     cudaMalloc(&histogramRRGPU, arraybytes);
-
     cudaMalloc(&raRealGPU, realbytes);
     cudaMalloc(&declRealGPU, realbytes);
-
     cudaMalloc(&raSimGPU, simbytes);
     cudaMalloc(&declSimGPU, simbytes);
 
@@ -237,7 +184,6 @@ int main(int argc, char *argv[])
     int blocksPerGrid = (NoofReal + threadsPerBlock - 1) / threadsPerBlock;
     fillBinsOptimizedKernel<<<blocksPerGrid, threadsPerBlock>>>(raRealGPU, declRealGPU, NoofReal, raSimGPU, declSimGPU, NoofSim, histogramDDGPU, histogramDRGPU, histogramRRGPU);
 
-
     // Copy the results back to the CPU
     cudaMemcpy(histogramDD, histogramDDGPU, arraybytes, cudaMemcpyDeviceToHost);
     cudaMemcpy(histogramDR, histogramDRGPU, arraybytes, cudaMemcpyDeviceToHost);
@@ -252,42 +198,31 @@ int main(int argc, char *argv[])
     cudaFree(raSimGPU);
     cudaFree(declSimGPU);
 
-    // calculate omega values on the CPU, can of course be done on the GPU
+    // Calculate omega values on the CPU
     calculateOmega();
-    // print the results
+
+    // Print the results
     printResults();
 
-   kerneltime = 0.0;
-   gettimeofday(&_ttime, &_tzone);
-   start = (double)_ttime.tv_sec + (double)_ttime.tv_usec/1000000.;
+    kerneltime = 0.0;
+    gettimeofday(&_ttime, &_tzone);
+    start = (double)_ttime.tv_sec + (double)_ttime.tv_usec/1000000.;
 
-// run your kernel here
-
-   gettimeofday(&_ttime, &_tzone);
-   end = (double)_ttime.tv_sec + (double)_ttime.tv_usec/1000000.;
-   kerneltime += end-start;
-   printf("   Run time = %.lf secs\n",kerneltime);
-
-   ////
-
-//    fillBinsOptimized();
-
-//    calculateOmega();
-//
-//    printResults();
+    gettimeofday(&_ttime, &_tzone);
+    end = (double)_ttime.tv_sec + (double)_ttime.tv_usec/1000000.;
+    kerneltime += end-start;
+    printf("   Run time = %.lf secs\n", kerneltime);
 
     free(ra_real);
     free(decl_real);
     free(ra_sim);
     free(decl_sim);
 
-
-   return(0);
+    return(0);
 }
 
 
-int readdata(char *argv1, char *argv2)
-{
+int readdata(char *argv1, char *argv2){
   int i,linecount;
   char inbuf[180];
   double ra, dec, phi, theta, dpi;
@@ -390,12 +325,7 @@ int readdata(char *argv1, char *argv2)
   return(0);
 }
 
-
-
-
-int getDevice(int deviceNo)
-{
-
+int getDevice(int deviceNo){
   int deviceCount;
   cudaGetDeviceCount(&deviceCount);
   printf("   Found %d CUDA devices\n",deviceCount);
@@ -433,6 +363,6 @@ int getDevice(int deviceNo)
     if ( device != deviceNo ) printf("   Unable to set device %d, using device %d instead",deviceNo, device);
     else printf("   Using CUDA device %d\n\n", device);
 
-return(0);
+    return(0);
 }
 
