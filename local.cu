@@ -53,7 +53,7 @@ __global__ void fillBinsOptimizedKernel(float *ra_real, float *decl_real, int No
 
             float resDeg = calculateAngularSeparationKernel(raRealRad, declRealRad, raOtherRad, declOtherRad);
             int binIndex = (int)(resDeg / BIN_SIZE);
-            atomicAdd(&histogramDD[binIndex], 1LL);
+            atomicAdd((unsigned long long int*)&histogramDD[binIndex], 1ULL);
         }
 
         for (int j = 0; j < NoofSim; j++) {
@@ -62,7 +62,7 @@ __global__ void fillBinsOptimizedKernel(float *ra_real, float *decl_real, int No
 
             float resDeg = calculateAngularSeparationKernel(raRealRad, declRealRad, raSimRad, declSimRad);
             int binIndex = (int)(resDeg / BIN_SIZE);
-            atomicAdd(&histogramDR[binIndex], 1LL);
+            atomicAdd((unsigned long long int*)&histogramDR[binIndex], 1ULL);
         }
     }
 
@@ -76,7 +76,7 @@ __global__ void fillBinsOptimizedKernel(float *ra_real, float *decl_real, int No
 
             float resDeg = calculateAngularSeparationKernel(raSimRad, declSimRad, raOtherRad, declOtherRad);
             int binIndex = (int)(resDeg / BIN_SIZE);
-            atomicAdd(&histogramRR[binIndex], 1LL);
+            atomicAdd((unsigned long long int*)&histogramRR[binIndex], 1ULL);
         }
     }
 }
